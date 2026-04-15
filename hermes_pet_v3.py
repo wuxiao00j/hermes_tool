@@ -125,6 +125,91 @@ DEFAULT_AGENT_LABEL = "全局最近 CLI 会话"
 DEFAULT_SESSION_AUTO = "__auto_latest__"
 DEFAULT_SESSION_MODE = "auto"
 
+LIVE_ACTIVITY_SUBSTRING_LABELS = [
+    ("waiting for non-streaming", "正在等待模型响应"),
+    ("waiting for api response", "正在等待模型响应"),
+    ("waiting for provider response", "正在等待模型响应"),
+    ("receiving stream response", "正在接收模型响应"),
+    ("stale stream detected", "正在重连模型响应流"),
+    ("stream retry", "正在重连模型响应流"),
+]
+
+TOOL_ACTION_LABELS = {
+    "terminal": ("正在执行 shell 命令", "已执行 shell 命令"),
+    "shell": ("正在执行 shell 命令", "已执行 shell 命令"),
+    "read_file": ("正在读取文件", "已读取文件"),
+    "read": ("正在读取文件", "已读取文件"),
+    "write_file": ("正在写入文件", "已写入文件"),
+    "write": ("正在写入文件", "已写入文件"),
+    "patch": ("正在修改文件", "已修改文件"),
+    "edit": ("正在修改文件", "已修改文件"),
+    "search_files": ("正在检索内容", "已完成内容检索"),
+    "grep": ("正在检索内容", "已完成内容检索"),
+    "browser_navigate": ("正在打开网页", "已打开网页"),
+    "navigate": ("正在打开网页", "已打开网页"),
+    "delegate_task": ("正在派发子任务", "已派发子任务"),
+    "skill_view": ("正在读取技能", "已读取技能"),
+    "todo": ("正在更新任务清单", "已更新任务清单"),
+    "execute_code": ("正在执行代码", "已执行代码"),
+    "hermes": ("正在调用 Hermes", "已调用 Hermes"),
+    "clarify": ("正在等待用户确认", "已确认"),
+}
+
+TOOL_SUMMARY_LABELS = {
+    "skill": "读取技能",
+    "plan": "更新任务清单",
+    "session_search": "检索历史会话",
+    "delegate_task": "派发子任务",
+    "memory": "处理记忆",
+    "read": "读取文件",
+    "grep": "检索内容",
+    "shell": "执行 shell 命令",
+    "write": "写入文件",
+    "edit": "修改文件",
+    "navigate": "打开网页",
+    "snapshot": "抓取快照",
+    "search": "搜索内容",
+    "skill_manage": "更新技能",
+    "skill_view": "读取技能",
+    "todo": "更新任务清单",
+    "read_file": "读取文件",
+    "search_files": "检索内容",
+    "write_file": "写入文件",
+    "patch": "修改文件",
+    "browser_navigate": "打开网页",
+    "browser_click": "点击网页",
+    "browser_type": "输入文本",
+    "browser_press": "按下按键",
+    "browser_scroll": "滚动网页",
+    "browser_vision": "分析页面",
+    "browser_console": "执行控制台",
+    "browser_back": "返回页面",
+    "browser_get_images": "提取图片",
+    "terminal": "执行 shell 命令",
+    "execute_code": "执行代码",
+    "hermes": "调用 Hermes",
+    "clarify": "等待用户确认",
+}
+
+SYSTEM_COMPLETION_LABELS = {
+    "User profile updated": "已更新用户资料",
+    "Memory updated": "已更新记忆",
+    "Memory saved": "已保存记忆",
+    "Skill updated": "已更新技能",
+    "Skill created": "已创建技能",
+    "Skill saved": "已保存技能",
+    "正在整理上下文": "已整理上下文",
+    "正在压缩上下文": "已压缩上下文",
+}
+
+TRANSIENT_COMPLETION_TEXTS = {
+    "正在请求模型响应",
+    "正在等待模型响应",
+    "正在接收模型响应",
+    "模型响应已完成",
+    "模型响应异常，正在重试",
+    "正在重连模型响应流",
+}
 
 # ============================================================
 # 配置管理器
@@ -142,7 +227,7 @@ class ConfigManager:
             "theme": "dark",
             "status_colors": DEFAULT_STATUS_COLORS.copy(),
             "auto_hide": False,
-            "auto_hide_timeout": 5,
+            "auto_hide_timeout": 10,
             "opacity": 95,
             "hotkey_toggle": "Alt+H",
             "hotkey_chat": "Alt+Space",
@@ -151,6 +236,7 @@ class ConfigManager:
             "session_mode": DEFAULT_SESSION_MODE,
             "selected_session_id": DEFAULT_SESSION_AUTO,
             "quick_messages": QUICK_MESSAGES.copy(),
+            "activity_panel_visible": True,
         }
         
         if self.config_file.exists():
@@ -284,6 +370,40 @@ class HermesMonitor(QThread):
     def get_status_snapshot(self) -> Tuple[str, str, dict]:
         return self._check_status()
         
+    def _update_token_stats(self) -> None:
+        conn = None
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            conn.row_factory = sqlite3.Row
+            session = conn.execute("""
+                SELECT id, message_count, input_tokens, output_tokens, reasoning_tokens
+                FROM sessions
+                WHERE ended_at IS NULL
+                ORDER BY started_at DESC LIMIT 1
+            """).fetchone()
+            if not session:
+                return
+            session_dict = dict(session)
+            total_tokens = (
+                (session_dict.get('input_tokens') or 0)
+                + (session_dict.get('output_tokens') or 0)
+                + (session_dict.get('reasoning_tokens') or 0)
+            )
+            if total_tokens > 0:
+                self.performance.update({
+                    "total_tokens": total_tokens,
+                    "input_tokens": session_dict.get('input_tokens', 0) or 0,
+                    "output_tokens": session_dict.get('output_tokens', 0) or 0,
+                    "reasoning_tokens": session_dict.get('reasoning_tokens', 0) or 0,
+                    "message_count": session_dict.get('message_count', 0) or 0,
+                    "token_data_available": True,
+                })
+        except Exception:
+            pass
+        finally:
+            if conn:
+                conn.close()
+
     def _check_status(self) -> Tuple[str, str, dict]:
         metadata = {
             "instance": self.instance_id,
@@ -321,6 +441,7 @@ class HermesMonitor(QThread):
             metadata['health_level'] = 'yellow' if live_activity.get("live_status") == self.WORKING else ('green' if self._healthy_recent_cron_success(metadata) else 'yellow')
             if metadata.get('recent_live_activity'):
                 metadata['recent_activity'] = list(metadata.get('recent_live_activity') or []) + list(metadata.get('recent_activity') or [])
+            self._update_token_stats()
             return live_activity.get("live_status"), live_activity.get("live_detail") or "处理中", metadata
 
         # 2. 查询数据库获取最新会话状态
@@ -484,31 +605,12 @@ class HermesMonitor(QThread):
         activity = str(payload.get("activity") or "").strip()
         tool_name = str(payload.get("current_tool") or "").strip()
         tool_args = payload.get("tool_args") if isinstance(payload.get("tool_args"), dict) else {}
-        lowered_activity = activity.lower()
         direct_detail = self._humanize_live_tool_name(tool_name, tool_args, activity)
         detail = chosen_detail or direct_detail
 
-        is_completion_event = (
-            activity.startswith('tool completed:')
-            or (activity.startswith('API call #') and 'completed' in activity)
-        )
-        is_streaming_event = (
-            'waiting for non-streaming api response' in lowered_activity
-            or 'waiting for api response' in lowered_activity
-            or 'receiving stream response' in lowered_activity
-            or 'stale stream detected' in lowered_activity
-            or 'stream retry' in lowered_activity
-        )
-        is_direct_tool_event = activity.startswith('executing tool: ') or bool(tool_name)
-
         live_status = self.WAITING
-        if payload.get("status") == "working":
-            if is_direct_tool_event and (age is None or age <= 15):
-                live_status = self.WORKING
-            elif is_streaming_event and (age is None or age <= 12):
-                live_status = self.WORKING
-            elif is_completion_event and (age is None or age <= 3):
-                live_status = self.WORKING
+        if payload.get("status") == "working" and (age is None or age <= 8):
+            live_status = self.WORKING
 
         return {
             "live_activity": activity,
@@ -570,41 +672,28 @@ class HermesMonitor(QThread):
         elif raw_activity.startswith('tool completed:'):
             completed = True
             tool = raw_activity.split(':', 1)[1].strip().split('(', 1)[0].strip()
-        if 'waiting for non-streaming api response' in lowered_activity or 'waiting for api response' in lowered_activity:
-            return '正在等待模型响应'
-        if 'receiving stream response' in lowered_activity:
-            return '正在接收模型响应'
+        if raw_activity.startswith('starting API call #'):
+            return '正在请求模型响应'
+        for needle, label in LIVE_ACTIVITY_SUBSTRING_LABELS:
+            if needle in lowered_activity:
+                return label
         if raw_activity.startswith('API call #') and 'completed' in raw_activity:
             return '模型响应已完成'
-        if 'stale stream detected' in lowered_activity or 'stream retry' in lowered_activity:
-            return '正在重连模型响应流'
-        if tool in ("terminal", "shell"):
-            return "已执行 shell 命令" if completed else "正在执行 shell 命令"
-        if tool in ("read_file", "read"):
-            path = args.get("path") if isinstance(args, dict) else None
-            return f"已读取文件: {Path(str(path)).name}" if completed and path else ("已读取文件" if completed else (f"正在读取文件: {Path(str(path)).name}" if path else "正在读取文件"))
-        if tool in ("write_file", "write"):
-            path = args.get("path") if isinstance(args, dict) else None
-            return f"已写入文件: {Path(str(path)).name}" if completed and path else ("已写入文件" if completed else (f"正在写入文件: {Path(str(path)).name}" if path else "正在写入文件"))
-        if tool in ("patch", "edit"):
-            path = args.get("path") if isinstance(args, dict) else None
-            return f"已修改文件: {Path(str(path)).name}" if completed and path else ("已修改文件" if completed else (f"正在修改文件: {Path(str(path)).name}" if path else "正在修改文件"))
-        if tool in ("search_files", "grep"):
-            return "已完成内容检索" if completed else "正在检索内容"
-        if tool in ("browser_navigate", "navigate"):
-            url = args.get("url") if isinstance(args, dict) else None
-            target = self._extract_target_from_url(str(url)) if url else None
-            return f"已打开网页: {target}" if completed and target else ("已打开网页" if completed else (f"正在打开网页: {target}" if target else "正在打开网页"))
-        if tool.startswith("browser_"):
-            return "已完成网页操作" if completed else "正在操作网页"
-        if tool == "delegate_task":
-            return "已派发子任务" if completed else "正在派发子任务"
-        if tool == "skill_view":
-            return "已读取技能" if completed else "正在读取技能"
-        if tool == "todo":
-            return "已更新任务清单" if completed else "正在更新任务清单"
-        if tool == "execute_code":
-            return "已执行代码" if completed else "正在执行代码"
+        if 'API error recovery' in raw_activity:
+            return '模型响应异常，正在重试'
+        if tool in TOOL_ACTION_LABELS:
+            present_label, past_label = TOOL_ACTION_LABELS[tool]
+            if tool in ("read_file", "read", "write_file", "write", "patch", "edit"):
+                path = args.get("path") if isinstance(args, dict) else None
+                noun = Path(str(path)).name if path else ""
+                base = past_label if completed else present_label
+                return f"{base}: {noun}" if noun else base
+            if tool in ("browser_navigate", "navigate"):
+                url = args.get("url") if isinstance(args, dict) else None
+                target = self._extract_target_from_url(str(url)) if url else None
+                base = past_label if completed else present_label
+                return f"{base}: {target}" if target else base
+            return past_label if completed else present_label
         if completed and tool:
             return f"已完成 {tool}"
         if raw_activity:
@@ -936,11 +1025,17 @@ class HermesMonitor(QThread):
         text = (content_text or "").strip()
         if not text:
             return ""
-        if text.startswith("{") or text.startswith("[{") or text.startswith("[CONTEXT COMPACTION"):
+        lowered = text.lower()
+        if "[context compaction" in lowered or "context compression" in lowered or "compressing context" in lowered:
+            return "正在整理上下文"
+        if text.startswith("{") or text.startswith("[{"):
             return ""
         best_line = self._pick_salient_text_line(text)
         if not best_line:
             return ""
+        lowered_best = best_line.lower()
+        if "context compaction" in lowered_best or "context compression" in lowered_best or "compressing context" in lowered_best:
+            return "正在整理上下文"
         return self._truncate_text(best_line, 56)
 
     def _summarize_reasoning_text(self, reasoning_text: str) -> str:
@@ -1222,10 +1317,10 @@ class HermesMonitor(QThread):
         if isinstance(summary, dict):
             total = summary.get("total")
             if isinstance(total, int) and total > 0:
-                return f"{total} task(s)"
+                return f"{total} 个任务"
         todos = payload.get("todos")
         if isinstance(todos, list) and todos:
-            return f"{len(todos)} task(s)"
+            return f"{len(todos)} 个任务"
         return ""
 
     def _extract_target_from_skill_content(self, content_text: str) -> str:
@@ -1301,30 +1396,20 @@ class HermesMonitor(QThread):
 
     def _compose_tool_summary(self, tool_name: str, target: str, error_state: bool = False, call_count: int = 1) -> str:
         prefix = "❌" if error_state else self._tool_emoji(tool_name)
-        if tool_name == "skill":
-            summary = f"{prefix} skill {target}" if target else f"{prefix} skill"
-        elif tool_name == "plan":
-            summary = f"{prefix} plan {target}" if target else f"{prefix} plan"
-        elif tool_name == "session_search":
-            summary = f"{prefix} 检索历史会话：{target}" if target else f"{prefix} 检索历史会话"
-        elif tool_name == "delegate_task":
-            summary = f"{prefix} 派发子任务：{target}" if target else f"{prefix} 派发子任务"
-        elif tool_name == "memory":
-            summary = f"{prefix} {target}" if target else f"{prefix} 处理记忆"
-        elif tool_name.startswith("browser_"):
+        if tool_name.startswith("browser_"):
             label = self._browser_action_label(tool_name)
             summary = f"{prefix} {label}"
             if target:
                 summary += f" {target}"
         else:
-            label = tool_name or "tool"
+            label = TOOL_SUMMARY_LABELS.get(tool_name, tool_name or "工具调用")
             summary = f"{prefix} {label}"
             if target:
                 summary += f" {target}"
         if call_count > 1:
             summary += f" +{call_count - 1}"
         if error_state:
-            summary += " [error]"
+            summary += " [异常]"
         return summary
 
     def _extract_activity_descriptor(self, msg: Dict) -> Tuple[str, str]:
@@ -3602,9 +3687,9 @@ class DynamicIslandWidget(QWidget):
     
     COMPACT_WIDTH = 360
     EXPANDED_WIDTH = 360
-    COLLAPSED_WIDTH = 72
+    COLLAPSED_WIDTH = 28
     PADDING = 36
-    COLLAPSED_HEIGHT = 8  # 缩进时只显示小条
+    COLLAPSED_HEIGHT = 28  # 自动收拢后缩成圆球
 
     def __init__(self, config: ConfigManager, parent=None):
         super().__init__(parent)
@@ -3635,12 +3720,12 @@ class DynamicIslandWidget(QWidget):
         self.main_layout.setSpacing(6)
 
         # 顶行
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(10)
+        self.top_row = QHBoxLayout()
+        self.top_row.setContentsMargins(0, 0, 0, 0)
+        self.top_row.setSpacing(10)
 
         self.status_dot = StatusDot()
-        top_row.addWidget(self.status_dot, alignment=Qt.AlignVCenter)
+        self.top_row.addWidget(self.status_dot, alignment=Qt.AlignVCenter)
 
         self.detail_label = QLabel(self.detail_text)
         detail_font = QFont("PingFang SC", 13)
@@ -3649,15 +3734,15 @@ class DynamicIslandWidget(QWidget):
         self.detail_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         self.detail_label.setWordWrap(False)
         self.detail_label.setFixedHeight(24)
-        top_row.addWidget(self.detail_label, 1)
+        self.top_row.addWidget(self.detail_label, 1)
 
         self.chevron_label = QLabel("⌄")
         chevron_font = QFont("PingFang SC", 14)
         self.chevron_label.setFont(chevron_font)
         self.chevron_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        top_row.addWidget(self.chevron_label, alignment=Qt.AlignVCenter)
+        self.top_row.addWidget(self.chevron_label, alignment=Qt.AlignVCenter)
 
-        self.main_layout.addLayout(top_row)
+        self.main_layout.addLayout(self.top_row)
 
         # 元信息
         self.meta_label = QLabel()
@@ -3678,11 +3763,14 @@ class DynamicIslandWidget(QWidget):
         text_color = self.theme_config.text_color
         text_secondary = self.theme_config.text_secondary
         
+        # 动态 border-radius: 保证即使展开也不会变方形
+        height = self.height()
+        radius = min(26, max(10, int(height * 0.38)))
         self.setStyleSheet(f"""
             QWidget#dynamicIsland {{
                 background-color: {self.theme_config.bg_color};
                 border: 1px solid {self.theme_config.border_color};
-                border-radius: 26px;
+                border-radius: {radius}px;
             }}
             QLabel {{
                 background: transparent;
@@ -3751,12 +3839,10 @@ class DynamicIslandWidget(QWidget):
             meta_text = self._format_metadata()
             self.meta_label.setText(meta_text)
             self.meta_label.show()
-            # 调整 label 大小以适应内容
             self.meta_label.adjustSize()
         else:
             self.meta_label.hide()
         
-        # 强制更新布局
         self.updateGeometry()
         self.adjustSize()
         
@@ -3764,28 +3850,38 @@ class DynamicIslandWidget(QWidget):
             size = self.calculate_size(expanded)
             self.parent().resize_for_content(size)
         self._update_detail_label()
+        self.apply_theme()
 
     def set_collapsed(self, collapsed: bool):
-        """设置智能缩进状态"""
+        """设置自动收拢状态"""
         self.collapsed = collapsed
         if collapsed:
-            # 缩进时隐藏内容
+            self.main_layout.setContentsMargins(0, 0, 0, 0)
+            self.main_layout.setSpacing(0)
+            self.top_row.setContentsMargins(0, 0, 0, 0)
+            self.top_row.setSpacing(0)
             self.detail_label.hide()
             self.chevron_label.hide()
-            self.status_dot.hide()
             self.meta_label.hide()
+            self.status_dot.show()
+            self.status_dot.setFixedSize(14, 14)
         else:
-            # 展开时显示内容
+            self.main_layout.setContentsMargins(18, 12, 18, 12)
+            self.main_layout.setSpacing(6)
+            self.top_row.setContentsMargins(0, 0, 0, 0)
+            self.top_row.setSpacing(10)
             self.detail_label.show()
             self.chevron_label.show()
             self.status_dot.show()
+            self.status_dot.setFixedSize(12, 12)
             if self.expanded:
                 self.meta_label.show()
-        
+
         if self.parent():
             size = self.calculate_size(self.expanded)
             self.parent().resize_for_content(size)
         self._update_detail_label()
+        self.apply_theme()
 
     def enterEvent(self, event):
         """鼠标进入事件"""
@@ -3799,82 +3895,13 @@ class DynamicIslandWidget(QWidget):
 
     def _format_metadata(self) -> str:
         parts = []
-        
-        if 'session_id' in self.metadata:
-            sid = self.metadata['session_id']
-            if len(sid) > 20:
-                sid = sid[:10] + "..." + sid[-6:]
-            parts.append(f"会话: {sid}")
-        
-        if 'message_count' in self.metadata:
-            parts.append(f"消息数: {self.metadata['message_count']}")
-        
-        if 'gateway' in self.metadata:
-            parts.append(f"网关: {'在线' if self.metadata['gateway'] else '离线'}")
-        if self.metadata.get('active_agents') not in (None, ''):
-            parts.append(f"活动 Agent: {self.metadata['active_agents']}")
-        if self.metadata.get('platforms'):
-            platform_names = ','.join(sorted(str(name) for name in self.metadata.get('platforms', {}).keys()))
-            if platform_names:
-                parts.append(f"平台: {platform_names}")
-        
-        if 'model' in self.metadata:
-            parts.append(f"模型: {self.metadata['model']}")
 
-        selected_agent_label = self.metadata.get('selected_agent_label') or self.metadata.get('selected_agent')
-        if selected_agent_label:
-            parts.append(f"Agent: {selected_agent_label}")
-
-        collaboration_stage = self._derive_collaboration_stage()
-        if collaboration_stage:
-            parts.append(f"阶段: {collaboration_stage}")
-
-        filter_field = self.metadata.get('session_filter_field')
-        filter_value = self.metadata.get('session_filter_value')
-        filter_mode = self.metadata.get('agent_filter_mode')
-        if filter_mode == 'global_cli_fallback':
-            parts.append("过滤: 全局 CLI")
-        elif filter_field and filter_value not in (None, ""):
-            parts.append(f"过滤: {filter_field}={filter_value}")
-
-        if self.metadata.get('fallback_to_legacy_null_agent'):
-            parts.append("兼容旧会话")
-
-        if self.metadata.get('status'):
-            parts.append(f"状态: {self.metadata['status']}")
-
-        if self.metadata.get('status_reason'):
-            parts.append(f"原因: {self.metadata['status_reason']}")
-
-        if self.metadata.get('cron_name'):
-            parts.append(f"任务: {self.metadata['cron_name']}")
-        if self.metadata.get('cron_job_id'):
-            parts.append(f"任务ID: {self._clip_text(self.metadata['cron_job_id'], 18)}")
-        if self.metadata.get('cron_last_status'):
-            parts.append(f"最近结果: {self.metadata['cron_last_status']}")
-        if self.metadata.get('cron_last_run_at'):
-            parts.append(f"上次运行: {self._format_clock_value(self.metadata['cron_last_run_at'])}")
-        if self.metadata.get('cron_next_run_at'):
-            parts.append(f"下次运行: {self._format_clock_value(self.metadata['cron_next_run_at'])}")
-        if self.metadata.get('cron_delivery'):
-            parts.append(f"回传: {self.metadata['cron_delivery']}")
-        if self.metadata.get('cron_schedule_display'):
-            parts.append(f"计划: {self.metadata['cron_schedule_display']}")
-        if self.metadata.get('cron_state'):
-            parts.append(f"调度状态: {self.metadata['cron_state']}")
-        if 'cron_enabled' in self.metadata:
-            parts.append(f"任务开关: {'启用' if self.metadata.get('cron_enabled') else '停用'}")
-        if self.metadata.get('cron_overdue'):
-            parts.append("⚠️ 调度超时")
-        if self.metadata.get('cron_last_error'):
-            parts.append(f"任务错误: {self._clip_text(self.metadata['cron_last_error'], 56)}")
-        if self.metadata.get('cron_last_delivery_error'):
-            parts.append(f"回传错误: {self._clip_text(self.metadata['cron_last_delivery_error'], 56)}")
-
+        # 动作
         recent_activity = self.metadata.get('recent_activity') or []
         if recent_activity:
-            parts.append(f"最近动作: {self._clip_text(recent_activity[-1], 56)}")
+            parts.append(f"⚡ {self._clip_text(recent_activity[-1], 40)}")
 
+        # 涉及文件
         recent_files = self.metadata.get('recent_files') or []
         if recent_files:
             filenames = []
@@ -3883,41 +3910,43 @@ class DynamicIslandWidget(QWidget):
                     filenames.append(Path(str(item)).name or str(item))
                 except Exception:
                     filenames.append(str(item))
-            parts.append(f"涉及文件: {', '.join(filenames)}")
+            parts.append(f"📁 {', '.join(filenames)}")
 
-        if self.metadata.get('session_mode'):
-            parts.append(f"会话模式: {self.metadata['session_mode']}")
-        source_summary = self._session_source_summary()
-        if source_summary:
-            parts.append(f"状态来源: {source_summary}")
-        if self.metadata.get('available_agent_field'):
-            parts.append(f"Agent字段: {self.metadata['available_agent_field']}")
-        if self.metadata.get('last_message_role'):
-            parts.append(f"最后角色: {self.metadata['last_message_role']}")
-        if self.metadata.get('last_message_age') is not None:
-            parts.append(f"最后活动: {self.metadata['last_message_age']}s 前")
-        if self.metadata.get('last_message_timestamp'):
-            parts.append(f"最后时间: {self._format_clock_value(self.metadata['last_message_timestamp'])}")
-        if self.metadata.get('live_session_last_updated'):
-            parts.append(f"会话刷新: {self._format_clock_value(self.metadata['live_session_last_updated'])}")
-        if self.metadata.get('session_selection_reason'):
-            parts.append(f"选会话: {self._clip_text(self.metadata['session_selection_reason'], 40)}")
-        if self.metadata.get('session_fallback_reason'):
-            parts.append(f"回退原因: {self._clip_text(self.metadata['session_fallback_reason'], 40)}")
-        if self.metadata.get('candidate_session_ids'):
-            parts.append(f"DB候选: {len(self.metadata['candidate_session_ids'])}")
-        if self.metadata.get('candidate_live_session_ids'):
-            parts.append(f"Live候选: {len(self.metadata['candidate_live_session_ids'])}")
-        if self.metadata.get('db_latest_session_id'):
-            parts.append(f"DB最新: {self._clip_text(self.metadata['db_latest_session_id'], 18)}")
+        # 任务
+        if self.metadata.get('cron_name'):
+            parts.append(f"⏱ {self.metadata['cron_name']}")
 
+        # 下次运行
+        if self.metadata.get('cron_next_run_at'):
+            parts.append(f"🕐 下次 {self._format_clock_value(self.metadata['cron_next_run_at'])}")
+
+        # 最近结果
+        if self.metadata.get('cron_last_status') and self.metadata.get('cron_configured'):
+            parts.append(f"📊 最近 {self.metadata['cron_last_status']}")
+
+        # 错误
+        if self.metadata.get('cron_last_error'):
+            parts.append(f"❌ 任务错误: {self._clip_text(self.metadata['cron_last_error'], 36)}")
+        if self.metadata.get('cron_last_delivery_error'):
+            parts.append(f"⚠️ 回传错误: {self._clip_text(self.metadata['cron_last_delivery_error'], 36)}")
+
+        # 模型
+        if 'model' in self.metadata:
+            parts.append(f"🤖 {self.metadata['model']}")
+
+        # 阶段
+        collaboration_stage = self._derive_collaboration_stage()
+        if collaboration_stage:
+            parts.append(f"📍 {collaboration_stage}")
+
+        # 当前会话
         if self.metadata.get('resolved_session_id'):
             rsid = str(self.metadata['resolved_session_id'])
             if len(rsid) > 16:
                 rsid = rsid[:8] + "..." + rsid[-4:]
-            parts.append(f"当前会话: {rsid}")
-        
-        return " · ".join(parts) if parts else ""
+            parts.append(f"💬 {rsid}")
+
+        return "\n".join(parts) if parts else ""
 
     def _derive_collaboration_stage(self) -> str:
         status = getattr(self, 'current_status', '')
@@ -4049,6 +4078,8 @@ class HermesDesktopPet(QWidget):
         self.send_worker = None
         self.manual_working_override: Optional[Dict] = None
         self._last_completion_signature = None
+        self._last_completed_action = ""
+        self._working_since = None
         
         self.instances = {DEFAULT_AGENT_SELECTION: DEFAULT_AGENT_LABEL}
         self.agent_options = []
@@ -4067,6 +4098,9 @@ class HermesDesktopPet(QWidget):
         self.last_uncollapsed_geometry = QRect(0, 0, self.WINDOW_WIDTH, 52)
         self.collapsed_edge = "right"
         self._last_auto_hide_signature = None
+
+        # 最近动作面板开关
+        self.activity_panel_visible = self.config.config.get("activity_panel_visible", True)
         
         # 展开动画
         self.expand_animation = None
@@ -4085,7 +4119,7 @@ class HermesDesktopPet(QWidget):
         self.init_monitor()
         self.init_tray()
         self.refresh_monitor_views()
-        self.apply_requested_auto_hide_timeout(5)
+        self.apply_requested_auto_hide_timeout(10)
 
         self.reset_auto_hide_timer()
     
@@ -4182,7 +4216,7 @@ class HermesDesktopPet(QWidget):
         self.reposition()
 
     def update_auxiliary_visibility(self):
-        show_activity = self.expanded and not self.is_collapsed
+        show_activity = self.expanded and not self.is_collapsed and self.activity_panel_visible
         self.activity_panel.setVisible(show_activity)
         self.history_panel.setVisible(self.history_mode and not self.is_collapsed)
         self.performance_panel.setVisible(self.performance_mode and not self.is_collapsed)
@@ -4198,6 +4232,12 @@ class HermesDesktopPet(QWidget):
 
         if hasattr(self, "monitor") and self.performance_mode:
             self.performance_panel.update_stats(self.monitor.performance.copy())
+
+    def toggle_activity_panel(self):
+        self.activity_panel_visible = not self.activity_panel_visible
+        self.config.config["activity_panel_visible"] = self.activity_panel_visible
+        self.config.save_config()
+        self.update_auxiliary_visibility()
     
     def reposition(self):
         screen = QApplication.primaryScreen().geometry()
@@ -4218,19 +4258,21 @@ class HermesDesktopPet(QWidget):
         self.reset_auto_hide_timer()
     
     def on_island_clicked(self):
-        """点击切换详情展开"""
+        """点击切换详情展开；收拢成圆球时只允许 hover 恢复"""
         if self.is_collapsed:
-            self.expand_from_collapsed()
-        else:
-            self.toggle_expanded()
+            self.reset_auto_hide_timer()
+            return
+        self.toggle_expanded()
         self.reset_auto_hide_timer()
     
     # ============================================================
     # 智能缩进功能
     # ============================================================
     def on_mouse_enter(self):
-        """鼠标进入岛屿区域"""
+        """鼠标进入岛屿/圆球区域"""
         try:
+            if self.is_collapsed:
+                self.expand_from_collapsed()
             self.reset_auto_hide_timer()
         except Exception as e:
             print(f"on_mouse_enter failed: {e}", file=sys.stderr)
@@ -4303,38 +4345,74 @@ class HermesDesktopPet(QWidget):
             job_id = str(job.get("id") or job.get("job_id") or "")
             enabled_action.triggered.connect(lambda checked, jid=job_id: self.set_cron_job_enabled(jid, checked))
             sub.addAction(enabled_action)
+            trigger_action = QAction("⚡ 立即触发", self)
+            trigger_action.triggered.connect(lambda checked, jid=job_id: self.trigger_cron_now(jid))
+            sub.addAction(trigger_action)
+
+    def trigger_cron_now(self, job_id: str):
+        if not job_id:
+            send_macos_notification("Hermes", "未指定任务 ID")
+            return
+        try:
+            result = subprocess.run(
+                ["hermes", "cron", "run", job_id],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                send_macos_notification("Hermes", f"已触发: {job_id}")
+            else:
+                send_macos_notification("Hermes", f"触发失败: {(result.stderr or result.stdout or '').strip()[:80]}")
+        except Exception as e:
+            send_macos_notification("Hermes", f"触发异常: {e}")
     
     def auto_collapse(self):
-        """贴边缩进功能已停用，保持稳定交互"""
-        return
+        """10 秒未悬停时自动收拢成圆球"""
+        if not self.auto_hide_enabled:
+            return
+        if self.is_collapsed:
+            return
+        if self.is_dragging or self.chat_mode or self.history_mode or self.performance_mode:
+            return
+        self.collapse_to_edge()
     
     def _build_collapsed_geometry(self) -> QRect:
-        screen = QApplication.primaryScreen().geometry()
-        collapsed_width = DynamicIslandWidget.COLLAPSED_WIDTH + 20
-        collapsed_height = DynamicIslandWidget.COLLAPSED_HEIGHT
-        visible_sliver = 8
-        current = self.geometry()
-        center_x = current.x() + (current.width() - collapsed_width) // 2
-        min_x = screen.x() + 8
-        max_x = screen.x() + screen.width() - collapsed_width - 8
-        target_x = min(max(center_x, min_x), max_x)
-        target_y = screen.y() - collapsed_height + visible_sliver
-        self.collapsed_edge = "top"
-        return QRect(target_x, target_y, collapsed_width, collapsed_height)
+        current = self.last_uncollapsed_geometry if self.last_uncollapsed_geometry.width() > 0 else self.geometry()
+        orb_size = DynamicIslandWidget.COLLAPSED_WIDTH + 20
+        target_x = current.x() + (current.width() - orb_size) // 2
+        target_y = current.y() + (current.height() - orb_size) // 2
+        return QRect(target_x, target_y, orb_size, orb_size)
     
     def collapse_to_edge(self):
-        """贴边缩进功能已停用"""
-        return
+        """收拢为仅保留状态灯的圆球"""
+        if self.is_collapsed:
+            return
+        self.last_uncollapsed_geometry = self.geometry()
+        self.is_collapsed = True
+        self.island.set_collapsed(True)
+        self.update_auxiliary_visibility()
+        self._collapse_anim = QPropertyAnimation(self, b"geometry")
+        self._collapse_anim.setDuration(1000)
+        self._collapse_anim.setStartValue(self.geometry())
+        self._collapse_anim.setEndValue(self._build_collapsed_geometry())
+        self._collapse_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._collapse_anim.start()
     
     def expand_from_collapsed(self, emphasize: bool = False):
-        """恢复到正常灵动岛样式"""
+        """从圆球平滑恢复到灵动岛"""
+        if not self.is_collapsed:
+            return
+        target = self.last_uncollapsed_geometry if self.last_uncollapsed_geometry.width() > 0 else QRect(self.x(), self.y(), self.WINDOW_WIDTH, 52)
         self.is_collapsed = False
         self.expanded = False
         self.island.set_collapsed(False)
         self.island.set_expanded(False)
         self.update_auxiliary_visibility()
-        compact_size = self.island.calculate_size(False)
-        self.resize_for_content(compact_size)
+        self._expand_anim = QPropertyAnimation(self, b"geometry")
+        self._expand_anim.setDuration(1000)
+        self._expand_anim.setStartValue(self.geometry())
+        self._expand_anim.setEndValue(target)
+        self._expand_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._expand_anim.start()
         if emphasize:
             self.animate_status_change()
     
@@ -4499,6 +4577,15 @@ class HermesDesktopPet(QWidget):
         previous_detail = self.current_detail
         self.current_status = status
 
+        # 完成摘要：刚做完什么
+        if old_status in ('working', 'thinking') and status in ('waiting', 'idle'):
+            meaningful = previous_detail.strip()
+            meaningful = SYSTEM_COMPLETION_LABELS.get(meaningful, meaningful)
+            if meaningful and meaningful not in TRANSIENT_COMPLETION_TEXTS and meaningful not in ('等待指令', '处理中', '正在处理', 'Hermes 就绪'):
+                self._last_completed_action = meaningful
+        elif status in ('working', 'thinking'):
+            self._last_completed_action = ""
+
         recent_activity = metadata.get("recent_activity") or []
         if detail in ("正在处理...", "处理中...", "处理中", "等待指令") and recent_activity:
             latest_activity = self.monitor._activity_core(recent_activity[-1]) if hasattr(self, 'monitor') else str(recent_activity[-1])
@@ -4516,12 +4603,30 @@ class HermesDesktopPet(QWidget):
                 detail = f"状态回退: {str(metadata['session_fallback_reason'])[:48]}"
 
         detail = self._derive_live_headline(status, detail, metadata)
+
+        # 待命时显示刚完成的摘要
+        if status in ('waiting', 'idle') and self._last_completed_action:
+            detail = f"刚完成: {self._last_completed_action[:52]}"
+
+        # 卡住检测
+        if status == 'working':
+            if old_status != 'working' or self._working_since is None:
+                self._working_since = time.time()
+            else:
+                elapsed = time.time() - self._working_since
+                live_age = metadata.get('live_age_seconds')
+                if elapsed > 60 and (live_age is None or live_age > 25):
+                    detail = f"⚠️ 疑似卡住 · {int(elapsed)}s 无实质进展"
+        else:
+            self._working_since = None
+
         self.monitor._append_pet_debug_log(status, detail, metadata) if hasattr(self, 'monitor') else None
 
         self.current_detail = detail
         
         self.island.set_status(status, detail, metadata)
         if hasattr(self, 'tray_icon'):
+            self.tray_icon.setIcon(self._build_tray_icon(status))
             self.tray_icon.setToolTip(self._build_tray_tooltip(status, detail, metadata))
         if self.expanded and isinstance(metadata, dict) and metadata.get("recent_activity") and not self.activity_panel.events:
             self.activity_panel.update_events(self.monitor.get_recent_history(10))
@@ -4678,6 +4783,12 @@ class HermesDesktopPet(QWidget):
         history_action = QAction("📜 最近消息", self)
         history_action.triggered.connect(self.toggle_history)
         menu.addAction(history_action)
+
+        activity_action = QAction("📡 最近动作", self)
+        activity_action.setCheckable(True)
+        activity_action.setChecked(self.activity_panel_visible)
+        activity_action.triggered.connect(self.toggle_activity_panel)
+        menu.addAction(activity_action)
         
         performance_action = QAction("📊 性能统计", self)
         performance_action.triggered.connect(self.toggle_performance)
@@ -4698,7 +4809,7 @@ class HermesDesktopPet(QWidget):
         logs_action.triggered.connect(self.open_logs)
         menu.addAction(logs_action)
         
-        status_action = QAction("ℹ️ 状态详情", self)
+        status_action = QAction("当前状态", self)
         status_action.triggered.connect(self.show_status)
         menu.addAction(status_action)
         
@@ -4719,7 +4830,7 @@ class HermesDesktopPet(QWidget):
         
         menu.addSeparator()
         
-        auto_hide_action = QAction("🙈 智能缩进", self)
+        auto_hide_action = QAction("🫧 自动收拢", self)
         auto_hide_action.setCheckable(True)
         auto_hide_action.setChecked(self.auto_hide_enabled)
         auto_hide_action.triggered.connect(self.toggle_auto_hide)
@@ -4923,6 +5034,20 @@ class HermesDesktopPet(QWidget):
     # ============================================================
     # 系统托盘
     # ============================================================
+    def _build_tray_icon(self, status: str = "waiting") -> QIcon:
+        color = QColor(self.STATUS_COLORS.get(status, DEFAULT_STATUS_COLORS.get(status, "#8E8E93")))
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.transparent)
+        p = QPainter(pixmap)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QColor(16, 16, 20))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(2, 6, 28, 20, 10, 10)
+        p.setBrush(color)
+        p.drawEllipse(6, 12, 7, 7)
+        p.end()
+        return QIcon(pixmap)
+
     def init_tray(self):
         tray_menu = QMenu()
         tray_menu.setStyleSheet("""
@@ -4957,18 +5082,7 @@ class HermesDesktopPet(QWidget):
         quit_action.triggered.connect(self.quit_app)
         tray_menu.addAction(quit_action)
         
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(Qt.transparent)
-        p = QPainter(pixmap)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QColor(16, 16, 20))
-        p.setPen(Qt.NoPen)
-        p.drawRoundedRect(2, 6, 28, 20, 10, 10)
-        p.setBrush(QColor("#30D158"))
-        p.drawEllipse(6, 12, 7, 7)
-        p.end()
-        
-        self.tray_icon = QSystemTrayIcon(QIcon(pixmap), self)
+        self.tray_icon = QSystemTrayIcon(self._build_tray_icon(self.current_status), self)
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.setToolTip("Hermes 灵动岛")
         self.tray_icon.show()
@@ -5164,10 +5278,10 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Hermes 灵动岛")
-    
+
     pet = HermesDesktopPet()
-    pet.show()
-    
+    pet.hide()
+
     sys.exit(app.exec_())
 
 
